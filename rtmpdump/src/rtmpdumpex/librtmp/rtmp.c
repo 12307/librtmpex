@@ -72,6 +72,8 @@ TLS_CTX RTMP_TLS_ctx;
 #define RTMP_SIG_SIZE 1536
 #define RTMP_LARGE_HEADER_SIZE 12
 
+#define RTMP_SEND_TIMEOUT 600
+
 static const int packetSize[] = { 12, 8, 4, 1 };
 
 int RTMP_ctrlC;
@@ -412,6 +414,7 @@ const AVal RTMP_DefaultFlashVer =
 static void
 SocksSetup(RTMP *r, AVal *sockshost)
 {
+    printf("sockshost->av_len : %d \n",sockshost->av_len);
   if (sockshost->av_len)
     {
       const char *socksport = strchr(sockshost->av_val, ':');
@@ -421,6 +424,7 @@ SocksSetup(RTMP *r, AVal *sockshost)
 	hostname[socksport - sockshost->av_val] = '\0';
       r->Link.sockshost.av_val = hostname;
       r->Link.sockshost.av_len = strlen(hostname);
+        printf("hostname : %s , av_len : %d \n",hostname,strlen(hostname));
 
       r->Link.socksport = socksport ? atoi(socksport + 1) : 1080;
       RTMP_Log(RTMP_LOGDEBUG, "Connecting via SOCKS proxy: %s:%d", r->Link.sockshost.av_val,
@@ -770,6 +774,7 @@ int RTMP_SetupURL(RTMP *r, char *url)
   len = strlen(url);
   ret = RTMP_ParseURL(url, &r->Link.protocol, &r->Link.hostname,
   	&port, &r->Link.playpath0, &r->Link.app);
+    printf("hostname : %s , port : %d \n",r->Link.hostname.av_val,port);
   if (!ret)
     return ret;
   r->Link.port = port;
@@ -874,6 +879,52 @@ add_addr_info(struct sockaddr_in *service, AVal *host, int port)
 {
   char *hostname;
   int ret = TRUE;
+    printf("host : %s , len : %d \n",host->av_val,host->av_len);
+  if (host->av_val[host->av_len])
+    {
+        printf("1 \n");
+      hostname = malloc(host->av_len+1);
+      memcpy(hostname, host->av_val, host->av_len);
+      hostname[host->av_len] = '\0';
+    }
+  else
+    {
+        printf("2 \n");
+      hostname = host->av_val;
+    }
+    
+    printf("hostname : %s \n",hostname);
+
+  service->sin_addr.s_addr = inet_addr(hostname);
+    printf("1 -- service->sin_addr.s_addr : %lu \n",service->sin_addr.s_addr);
+  if (service->sin_addr.s_addr == INADDR_NONE)
+    {
+      struct hostent *host = gethostbyname(hostname);
+      if (host == NULL || host->h_addr == NULL)
+	{
+	  RTMP_Log(RTMP_LOGERROR, "Problem accessing the DNS. (addr: %s)", hostname);
+	  ret = FALSE;
+	  goto finish;
+	}
+        printf("2 \n");
+      service->sin_addr = *(struct in_addr *)host->h_addr;
+    }
+
+    printf("2 -- service->sin_addr.s_addr : %lu \n",service->sin_addr.s_addr);
+    
+  service->sin_port = htons(port);
+    printf("sin_port : %d \n",service->sin_port);
+finish:
+  if (hostname != host->av_val)
+    free(hostname);
+  return ret;
+}
+
+static int
+add_addr_info_ipv6(struct sockaddr_in6 *service, AVal *host, int port)
+{
+  char *hostname;
+  int ret = TRUE;
   if (host->av_val[host->av_len])
     {
       hostname = malloc(host->av_len+1);
@@ -884,27 +935,33 @@ add_addr_info(struct sockaddr_in *service, AVal *host, int port)
     {
       hostname = host->av_val;
     }
-
-  service->sin_addr.s_addr = inet_addr(hostname);
-  if (service->sin_addr.s_addr == INADDR_NONE)
+    
+    printf("hostname : %s \n",hostname);
+    
+  if (inet_pton(AF_INET6, hostname, &service->sin6_addr) <= 0)
     {
-      struct hostent *host = gethostbyname(hostname);
+        printf("1");
+      struct hostent *host = gethostbyname2(hostname,AF_INET6);
       if (host == NULL || host->h_addr == NULL)
 	{
 	  RTMP_Log(RTMP_LOGERROR, "Problem accessing the DNS. (addr: %s)", hostname);
 	  ret = FALSE;
 	  goto finish;
 	}
-      service->sin_addr = *(struct in_addr *)host->h_addr;
+        
+        memcpy(service->sin6_addr.__u6_addr.__u6_addr8, host->h_addr, host->h_length );
     }
-
-  service->sin_port = htons(port);
+    
+    printf("inet_pton: 0x%x\n", service->sin6_addr);
+    
+    service->sin6_port = htons(port);
+    
+    printf("sin6_port : %d \n",service->sin6_port);
 finish:
   if (hostname != host->av_val)
     free(hostname);
   return ret;
 }
-
 int
 RTMP_Connect0Ex(RTMP *r, struct sockaddr * service, long timeout)
 {
@@ -1007,7 +1064,7 @@ RTMP_Connect0Ex(RTMP *r, struct sockaddr * service, long timeout)
             RTMP_Log(RTMP_LOGERROR, "%s, Setting socket rcv timeout to %ds failed!",
                      __FUNCTION__, r->Link.timeout);
         }
-        SET_SNDTIMEO(sendTime,0,200);
+        SET_SNDTIMEO(sendTime,0,RTMP_SEND_TIMEOUT);
         if (setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&sendTime, sizeof(sendTime)))
         {
             RTMP_Log(RTMP_LOGERROR, "%s, Setting socket send timeout to %ds failed!",
@@ -1069,7 +1126,7 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service)
         RTMP_Log(RTMP_LOGERROR, "%s, Setting socket timeout to %ds failed!",
 	    __FUNCTION__, r->Link.timeout);
       }
-      SET_SNDTIMEO(sendTime,0,200);
+      SET_SNDTIMEO(sendTime,0,800);
       if (setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&sendTime, sizeof(sendTime)))
       {
           RTMP_Log(RTMP_LOGERROR, "%s, Setting socket timeout to %ds failed!",
@@ -1079,6 +1136,124 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service)
 
   setsockopt(r->m_sb.sb_socket, IPPROTO_TCP, TCP_NODELAY, (char *) &on, sizeof(on));
 
+  return TRUE;
+}
+
+int
+RTMP_Connect0_IPV6(RTMP *r, struct sockaddr_in6 * service, long  timeout)
+{
+  int on = 1;
+  struct pollfd pfd;
+    
+  r->m_sb.sb_timedout = FALSE;
+  r->m_pausing = 0;
+  r->m_fDuration = 0.0;
+
+  r->m_sb.sb_socket = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
+  if (r->m_sb.sb_socket != -1)
+  {
+    RTMP_Log(RTMP_LOGERROR, "port : %d , RTMP_Connect0_IPV6: 0x%x \n",service->sin6_port, service->sin6_addr);
+    int fd = r->m_sb.sb_socket;
+    int old = fcntl(fd, F_GETFL, 0);
+    if (fcntl(fd, F_SETFL, old|O_NONBLOCK) < 0) {
+        RTMP_Log(RTMP_LOGERROR, "setting fd error: errno,%s\n", strerror(errno));
+        close(fd);
+        return FALSE;
+    }
+
+    if ((connect(r->m_sb.sb_socket, service, sizeof(struct sockaddr_in6))  == -1) &&
+          (errno != EINPROGRESS))
+	{
+	  int err = GetSockError();
+	  RTMP_Log(RTMP_LOGERROR, "%s, failed to connect socket. %d (%s)",
+	      __FUNCTION__, err, strerror(err));
+	  RTMP_Close(r);
+	  return FALSE;
+	}
+
+      memset(&pfd, 0, sizeof(pfd));
+      pfd.fd = fd;
+      pfd.events = POLLOUT | POLLERR | POLLHUP | POLLNVAL;
+      
+      int ret = poll(&pfd, 1, timeout);
+      RTMP_Log(RTMP_LOGWARNING, "RTMP connection poll timeout=%d return %d, %s\n", timeout, ret, strerror(errno));
+      if (ret < 0) {
+          if (errno == EINTR) {
+              close(fd);
+              RTMP_Log(RTMP_LOGERROR, "RTMP connection poll error, %s\n", strerror(errno));
+              return FALSE;
+          }
+          close(fd);
+          RTMP_Log(RTMP_LOGERROR, "RTMP connection poll error, %s\n", strerror(errno));
+          return FALSE;
+          
+      } else if (0 == ret) {
+          RTMP_Log(RTMP_LOGERROR, "RTMP connection poll error, ret=%d, %s\n", ret, strerror(errno));
+          close(fd);
+          return FALSE;
+      }
+      
+      RTMP_Log(RTMP_LOGWARNING, "RTMP connection poll EVENT=0x%04x, %s\n", pfd.revents, strerror(errno));
+      if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+          RTMP_Log(RTMP_LOGERROR, "RTMP connection poll error EVENT=0x%04x, %s\n", pfd.revents, strerror(errno));
+          close(fd);
+          return FALSE;
+      }
+      RTMP_Log(RTMP_LOGWARNING, "RTMP connection getsockopt...");
+      int err;
+      socklen_t errlen;
+      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, (socklen_t*)&errlen) == -1) {
+          close(fd);
+          RTMP_Log(RTMP_LOGERROR, "RTMP connection getsockopt error");
+          return FALSE;
+      }
+      RTMP_Log(RTMP_LOGWARNING, "RTMP connection getsockopt err=%d", err);
+      if (err != 0) {//check the SO_ERROR state
+          errno = err;
+          close(fd);
+          return FALSE;
+      }
+      
+      fcntl(fd, F_SETFL, old);
+      
+    if (r->Link.socksport)
+	{
+	  RTMP_Log(RTMP_LOGDEBUG, "%s ... SOCKS negotiation", __FUNCTION__);
+	  if (!SocksNegotiate(r))
+	    {
+	      RTMP_Log(RTMP_LOGERROR, "%s, SOCKS negotiation failed.", __FUNCTION__);
+	      RTMP_Close(r);
+	      return FALSE;
+	    }
+	}
+    }
+  else
+    {
+      RTMP_Log(RTMP_LOGERROR, "%s, failed to create socket. Error: %d", __FUNCTION__,
+	  GetSockError());
+      return FALSE;
+    }
+
+  /* set timeout */
+  {
+      SET_RCVTIMEO(tv, r->Link.timeout);
+      if (setsockopt
+        (r->m_sb.sb_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)))
+      {
+        RTMP_Log(RTMP_LOGERROR, "%s, Setting socket timeout to %ds failed!",
+	    __FUNCTION__, r->Link.timeout);
+      }
+      SET_SNDTIMEO(sendTime,0,RTMP_SEND_TIMEOUT);
+      if (setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&sendTime, sizeof(sendTime)))
+      {
+          RTMP_Log(RTMP_LOGERROR, "%s, Setting socket send timeout to %ds failed!",
+                   __FUNCTION__, r->Link.timeout);
+      }
+  }
+
+  setsockopt(r->m_sb.sb_socket, IPPROTO_TCP, TCP_NODELAY, (char *) &on, sizeof(on));
+  int value = 1;
+  setsockopt(r->m_sb.sb_socket, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value));
   return TRUE;
 }
 
@@ -1156,58 +1331,173 @@ RTMP_Connect1(RTMP *r, RTMPPacket *cp)
 int
 RTMP_ConnectEx(RTMP *r, RTMPPacket *cp, long timeout)
 {
-    struct sockaddr_in service;
-    if (!r->Link.hostname.av_len)
-        return FALSE;
-    
-    memset(&service, 0, sizeof(struct sockaddr_in));
-    service.sin_family = AF_INET;
+    struct addrinfo *answer,hints;
+    char *hostname;
+    AVal *host = NULL;
     
     if (r->Link.socksport)
     {
-        /* Connect via SOCKS */
-        if (!add_addr_info(&service, &r->Link.sockshost, r->Link.socksport))
-            return FALSE;
+        //        printf("sockshost : %s , len : %d , port : %d \n",r->Link.sockshost.av_val,r->Link.sockshost.av_len,r->Link.socksport);
+        host = &r->Link.sockshost;
     }
     else
     {
-        /* Connect directly */
-        if (!add_addr_info(&service, &r->Link.hostname, r->Link.port))
-            return FALSE;
+        //        printf("sockshost : %s , len : %d , port : %d \n",r->Link.hostname.av_val,r->Link.hostname.av_len,r->Link.socksport);
+        host = &r->Link.hostname;
     }
     
-    if (!RTMP_Connect0Ex(r, (struct sockaddr *)&service, timeout))
+    if (host->av_val[host->av_len])
+    {
+        hostname = malloc(host->av_len+1);
+        memcpy(hostname, host->av_val, host->av_len);
+        hostname[host->av_len] = '\0';
+    }
+    else
+    {
+        hostname = host->av_val;
+    }
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = PF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_DEFAULT;
+    printf("RTMP_ConnectEx: 1 -- hostname : %s \n",hostname);
+    int ret = getaddrinfo(hostname, NULL,&hints, &answer);
+    if (ret != 0)
+    {
+        RTMP_Log(RTMP_LOGERROR, "error -- %s \n",gai_strerror(ret));
         return FALSE;
+    }
     
-    r->m_bSendCounter = TRUE;
-    
-    return RTMP_Connect1(r, cp);
+    switch (answer->ai_family){
+        case AF_UNSPEC:
+            RTMP_Log(RTMP_LOGERROR, "AF_UNSPEC \n");
+            return FALSE;
+        case AF_INET:
+            RTMP_Log(RTMP_LOGERROR, "AF_INET.... \n");
+            return RTMP_Connect_Ipv4(r,cp, timeout);
+        case AF_INET6:
+            RTMP_Log(RTMP_LOGERROR, "AF_INET6.... \n");
+            return RTMP_Connect_Ipv6(r,cp, timeout);
+    }
 }
 
+//int
+//RTMP_Connect(RTMP *r, RTMPPacket *cp)
+//{
+//    struct addrinfo *answer,hints;
+//    char *hostname;
+//    AVal *host = NULL;
+//    
+//    if (r->Link.socksport)
+//    {
+////        printf("sockshost : %s , len : %d , port : %d \n",r->Link.sockshost.av_val,r->Link.sockshost.av_len,r->Link.socksport);
+//        host = &r->Link.sockshost;
+//    }
+//    else
+//    {
+////        printf("sockshost : %s , len : %d , port : %d \n",r->Link.hostname.av_val,r->Link.hostname.av_len,r->Link.socksport);
+//        host = &r->Link.hostname;
+//    }
+//    
+//    if (host->av_val[host->av_len])
+//    {
+//        hostname = malloc(host->av_len+1);
+//        memcpy(hostname, host->av_val, host->av_len);
+//        hostname[host->av_len] = '\0';
+//    }
+//    else
+//    {
+//        hostname = host->av_val;
+//    }
+//    
+////    printf("1 -- hostname : %s \n",hostname);
+//    int ret = getaddrinfo(hostname, NULL,NULL, &answer);
+//    if (ret != 0)
+//    {
+//        printf("error -- %s \n",gai_strerror(ret));
+//        return FALSE;
+//    }
+//
+//    switch (answer->ai_family){
+//            case AF_UNSPEC:
+//                printf("AF_UNSPEC \n");
+//                return FALSE;
+//            case AF_INET:
+//                printf("AF_INET \n");
+//                return RTMP_Connect_Ipv4(r,cp);
+//            case AF_INET6:
+//                printf("AF_INET6 \n");
+//                return RTMP_Connect_Ipv6(r,cp);
+//        }  
+//}
+
 int
-RTMP_Connect(RTMP *r, RTMPPacket *cp)
+RTMP_Connect_Ipv4(RTMP *r, RTMPPacket *cp, long timeout)
 {
   struct sockaddr_in service;
   if (!r->Link.hostname.av_len)
     return FALSE;
 
+  printf("RTMP_Connect_Ipv4...\r\n");
   memset(&service, 0, sizeof(struct sockaddr_in));
   service.sin_family = AF_INET;
+    
+//    printf("sockshost : %s , len : %d , port : %d \n",r->Link.hostname.av_val,r->Link.hostname.av_len,r->Link.socksport);
 
   if (r->Link.socksport)
     {
       /* Connect via SOCKS */
-      if (!add_addr_info(&service, &r->Link.sockshost, r->Link.socksport))
+        if (!add_addr_info(&service, &r->Link.sockshost, r->Link.socksport)){
+            printf("RTMP_Connect_Ipv4: add_addr_info error, via socks");
+            return FALSE;
+        }
+	
+    }
+  else
+    {
+      /* Connect directly */
+        if (!add_addr_info(&service, &r->Link.hostname, r->Link.port)){
+            printf("RTMP_Connect_Ipv4: add_addr_info error, directly");
+            return FALSE;
+        }
+    }
+
+    printf("RTMP_Connect_Ipv4 call RTMP_Connect0Ex\r\n");
+    if (!RTMP_Connect0Ex(r, (struct sockaddr *)&service, timeout)){
+        printf("RTMP_Connect_Ipv4: RTMP_Connect0Ex error\r\n");
+        return FALSE;
+    }
+    
+
+  r->m_bSendCounter = TRUE;
+
+  return RTMP_Connect1(r, cp);
+}
+
+int RTMP_Connect_Ipv6(RTMP *r, RTMPPacket *cp, long timeout)
+{
+  struct sockaddr_in6 service;
+  if (!r->Link.hostname.av_len)
+    return FALSE;
+
+  memset(&service, 0, sizeof(struct sockaddr_in6));
+  service.sin6_family = AF_INET6;
+
+  if (r->Link.socksport)
+    {
+      /* Connect via SOCKS */
+      if (!add_addr_info_ipv6(&service, &r->Link.sockshost, r->Link.socksport))
 	return FALSE;
     }
   else
     {
       /* Connect directly */
-      if (!add_addr_info(&service, &r->Link.hostname, r->Link.port))
+      if (!add_addr_info_ipv6(&service, &r->Link.hostname, r->Link.port))
 	return FALSE;
     }
 
-  if (!RTMP_Connect0(r, (struct sockaddr *)&service))
+  if (!RTMP_Connect0_IPV6(r, (struct sockaddr_in6 *)&service, timeout))
     return FALSE;
 
   r->m_bSendCounter = TRUE;
@@ -3242,7 +3532,7 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
               if (PublisherAuth(r, &description) == 1)
               {
                 CloseInternal(r, 1);
-                if (!RTMP_Connect(r, NULL) || !RTMP_ConnectStream(r, 0))
+                if (!RTMP_ConnectEx(r, NULL, 2000) || !RTMP_ConnectStream(r, 0))
                   goto leave;
               }
             }

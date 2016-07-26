@@ -61,16 +61,14 @@ export BUILD_TOOLS="${DEVELOPER}"
 
 echo "Building librtmp for ${PLATFORM} ${SDKVERSION} ${ARCH}"
 echo "Please wait..."
-echo "1"
+
 # add arch to CC=
 sed -ie "s!AR=\$(CROSS_COMPILE)ar!AR=/usr/bin/ar!" "Makefile"
 sed -ie "/CC=\$(CROSS_COMPILE)gcc/d" "Makefile"
 echo "CC=\$(CROSS_COMPILE)gcc -arch ${ARCH}" >> "Makefile"
-echo "2"
 
 export CROSS_COMPILE="${DEVELOPER}/usr/bin/"
 export XCFLAGS="-isysroot ${CROSS_TOP}/SDKs/${CROSS_SDK} -miphoneos-version-min=7.0 -I${INCLUDEPATH} -arch ${ARCH}"
-echo "3"
 
 if [ "${ARCH}" == "i386" ];
 then
@@ -81,12 +79,10 @@ fi
 OUTPATH="${BUILDPATH}/librtmp-${PLATFORM}${SDKVERSION}-${ARCH}.sdk"
 mkdir -p "${OUTPATH}"
 LOG="${OUTPATH}/build-librtmp.log"
-echo "4"
 
 make SYS=darwin >> "${LOG}" 2>&1
 make SYS=darwin prefix="${OUTPATH}" install >> "${LOG}" 2>&1
 make clean >> "${LOG}" 2>&1
-echo "5"
 
 LIBRTMP_REPO+="${OUTPATH}/lib/${LIBRTMP} "
 done
